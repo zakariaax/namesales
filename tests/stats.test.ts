@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { prefixBounds, sldDomainBounds } from "../src/shared/domain";
-import { foldStats, interpretCount, statsAreStale } from "../src/shared/stats";
+import { readFileSync } from "node:fs";
+import { foldStats, interpretCount, shouldRebuild, statsAreStale } from "../src/shared/stats";
 import { resultPages } from "../src/shared/search";
+import { INSERT_EXTENSION_STATS_SQL, INSERT_SUMMARY_STATS_SQL, INSERT_VENUE_STATS_SQL } from "../src/worker/stats";
 
 describe("catalog stats", () => {
   it("folds one grouped scan into extension and venue totals", () => {
@@ -31,6 +33,33 @@ describe("catalog stats", () => {
     expect(interpretCount(501, 500)).toEqual({ total: 500, exact: false });
     expect(resultPages(420, 50)).toBe(9);
     expect(resultPages(226_029, 50)).toBe(41);
+  });
+});
+
+describe("stats rebuild", () => {
+  it("inserts extension and venue counts with no bound parameters", () => {
+    expect(INSERT_EXTENSION_STATS_SQL).toContain("INSERT INTO sales_stats_extension");
+    expect(INSERT_EXTENSION_STATS_SQL).toContain("GROUP BY extension");
+    expect(INSERT_EXTENSION_STATS_SQL).not.toContain("?");
+    expect(INSERT_VENUE_STATS_SQL).toContain("GROUP BY venue");
+    expect(INSERT_VENUE_STATS_SQL).not.toContain("?");
+    expect(INSERT_SUMMARY_STATS_SQL.match(/\?/g)).toHaveLength(1);
+  });
+
+  it("rebuilds from a public request at most once a day, and always for cron or the admin key", () => {
+    const recent = "2026-10-25T01:30:00.000Z";
+    const now = Date.parse("2026-10-25T12:00:00.000Z");
+    expect(shouldRebuild("auto", recent, now)).toBe(false);
+    expect(shouldRebuild("public", recent, now)).toBe(false);
+    expect(shouldRebuild("forced", recent, now)).toBe(true);
+    expect(shouldRebuild("auto", null, now)).toBe(true);
+    expect(shouldRebuild("public", "2026-10-24T01:30:00.000Z", now)).toBe(true);
+  });
+
+  it("schedules the nightly refresh at 01:30 UTC", () => {
+    const config = readFileSync("wrangler.toml", "utf8");
+    expect(config).toContain('crons = ["30 1 * * *"]');
+    expect(config).not.toMatch(/0003_/);
   });
 });
 

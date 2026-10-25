@@ -24,8 +24,6 @@ export function SearchPage() {
   const [loading, setLoading] = useState(parsed.ok);
   const [drawer, setDrawer] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (parsed.ok) setDraft(parsed.state.filter.q);
@@ -55,7 +53,7 @@ export function SearchPage() {
         setLoading(false);
       });
     return () => controller.abort();
-  }, [query, reloadKey]);
+  }, [query]);
 
   useEffect(() => {
     const view = parsed.ok ? parsed.state.view : "search";
@@ -86,19 +84,6 @@ export function SearchPage() {
     const nextParams = writePage(next);
     if (nextParams.toString() === params.toString()) return;
     setParams(nextParams);
-  };
-
-  const refreshCounts = async () => {
-    setRefreshing(true);
-    try {
-      const next = await getJson<MetaResponse>("/api/meta?refresh=1");
-      setMeta(next);
-      setReloadKey((value) => value + 1);
-    } catch {
-      /* The stale note stays up so the refresh can be tried again. */
-    } finally {
-      setRefreshing(false);
-    }
   };
 
   const reset = () => {
@@ -250,10 +235,7 @@ export function SearchPage() {
 
       {meta?.stale && (
         <p className="notice">
-          Counts lag the sales loaded so far.
-          <button type="button" className="text-button" onClick={() => void refreshCounts()} disabled={refreshing}>
-            {refreshing ? "Refreshing" : "Refresh counts"}
-          </button>
+          Counts lag the sales loaded so far. They refresh nightly at 01:30 UTC.
         </p>
       )}
       {data?.notice && <p className="notice">{data.notice}</p>}
@@ -273,7 +255,7 @@ export function SearchPage() {
         {data && data.results.length === 0 && !error && (
           <div className="empty">
             <h2>No sales match</h2>
-            <p>Widen the price or date range, or include range estimates.</p>
+            <p>{data.notice ? "Use the note above, or add an extension to a one- or two-character keyword." : "Widen the price or date range, or include range estimates."}</p>
           </div>
         )}
         {!data && !error && <div className="skeleton" aria-hidden="true">{Array.from({ length: 8 }, (_, index) => <span key={index} />)}</div>}

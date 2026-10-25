@@ -7,7 +7,7 @@ import {
   resultPages,
   type SalesFilter,
 } from "../shared/search";
-import { interpretCount } from "../shared/stats";
+import { interpretCount, type RebuildMode } from "../shared/stats";
 import type { CompsResponse, DomainResponse, MetaResponse, Sale, SearchResponse } from "../shared/types";
 import { cachedCount } from "./count-cache";
 import type { Env } from "./env";
@@ -47,6 +47,20 @@ export async function searchSales(
 ): Promise<SearchResponse> {
   const built = buildSalesQuery(filter);
   const started = Date.now();
+  if (built.skipped) {
+    return {
+      total: 0,
+      total_exact: true,
+      page: filter.page,
+      page_size: filter.pageSize,
+      pages: 1,
+      elapsed_ms: Date.now() - started,
+      match_applied: built.matchApplied,
+      notice: built.notice,
+      window: extra,
+      results: [],
+    };
+  }
   const [page, counted] = await Promise.all([
     db.prepare(built.sql).bind(...built.binds).all<Sale>(),
     resolveCount(db, built, origin),
@@ -129,8 +143,8 @@ export async function domainComps(db: D1Database, rawDomain: string): Promise<Co
   };
 }
 
-export async function meta(db: D1Database, refresh = false): Promise<MetaResponse> {
-  const stats = await metaStats(db, refresh);
+export async function meta(db: D1Database, mode: RebuildMode = "auto"): Promise<MetaResponse> {
+  const stats = await metaStats(db, mode);
   return {
     total: stats.total,
     estimates: stats.estimates,
@@ -141,6 +155,7 @@ export async function meta(db: D1Database, refresh = false): Promise<MetaRespons
     venues: stats.venues,
     refreshed_at: stats.refreshed_at,
     stale: stats.stale,
+    refresh: stats.refresh,
   };
 }
 

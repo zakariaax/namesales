@@ -47,6 +47,8 @@ export interface BuiltSql {
   access: AccessPath;
   /** No predicate at all, so a cached catalog total is the exact count. */
   useCatalogTotal: boolean;
+  /** Short keyword with nothing indexed to narrow it. The worker runs no sales scan. */
+  skipped: boolean;
 }
 
 type SqlValue = string | number;
@@ -59,6 +61,8 @@ const COUNT_PROBE = SEARCH_COUNT_CAP + 1;
 const TRIM_NOTICE = "The keyword was shortened to fit the 50-byte search limit.";
 const LENGTH_SORT_NOTICE =
   "Length sort needs a keyword, extension, price, or date filter, so these are the newest sales.";
+const SHORT_KEYWORD_NOTICE =
+  "Type at least 3 characters to search inside a name, or choose Starts with for a shorter keyword.";
 
 const SORT_SQL: Record<SortKey, string> = {
   date: "s.date",
@@ -255,6 +259,8 @@ export function buildSalesQuery(filter: SalesFilter): BuiltSql {
   let exactDomain = false;
   let exactSld = false;
   let selectivePrefix = false;
+  let blockShort = false;
+  let boundedResidual = false;
 
   if (filter.q) {
     const domainQuery = filter.q.includes(".");
@@ -283,14 +289,32 @@ export function buildSalesQuery(filter: SalesFilter): BuiltSql {
       matchApplied = "suffix";
       useFts = true;
       if (pattern.trimmed) notice = TRIM_NOTICE;
-    } else if (filter.match === "starts" || (!domainQuery && filter.match === "contains")) {
+    } else if (filter.match === "starts") {
+      // Any length. The domain index range is the read, including a 1–2 character prefix.
       const bounds = prefixBounds(filter.q);
       where.push("s.domain >= ? AND s.domain < ?");
       binds.push(bounds.low, bounds.high);
       matchApplied = "prefix";
-      selectivePrefix = filter.q.length >= 3;
-      if (filter.match === "contains") {
+      selectivePrefix = true;
+    } else if (!domainQuery && filter.q.length < 3 && (filter.match === "contains" || filter.match === "ends")) {
+      if (!hasIndexedNarrowing(filter)) {
+        blockShort = true;
+      } else if (filter.match === "contains") {
+        const bounds = prefixBounds(filter.q);
+        where.push("s.domain >= ? AND s.domain < ?");
+        binds.push(bounds.low, bounds.high);
+        matchApplied = "prefix";
+        // A date window is already a bounded read. Otherwise stay on the domain range
+        // so a short prefix does not walk the date index.
+        selectivePrefix = !(filter.dateFrom || filter.dateTo) || filter.extensions.length > 0;
         notice = "Names are matched from the start when the keyword is shorter than 3 characters.";
+      } else {
+        const pattern = likePattern("suffix", filter.q);
+        where.push("s.sld LIKE ? ESCAPE '\\'");
+        binds.push(pattern.pattern);
+        matchApplied = "suffix";
+        boundedResidual = true;
+        if (pattern.trimmed) notice = TRIM_NOTICE;
       }
     } else if (filter.match === "ends") {
       const pattern = likePattern("suffix", filter.q);
@@ -305,6 +329,21 @@ export function buildSalesQuery(filter: SalesFilter): BuiltSql {
       matchApplied = "like";
       if (pattern.trimmed) notice = TRIM_NOTICE;
     }
+  }
+
+  if (blockShort) {
+    const offset = (filter.page - 1) * filter.pageSize;
+    return {
+      sql: "SELECT s.* FROM sales s WHERE 0 LIMIT ? OFFSET ?",
+      countSql: "SELECT 0 AS n",
+      binds: [filter.pageSize, offset],
+      countBinds: [],
+      matchApplied: "none",
+      notice: SHORT_KEYWORD_NOTICE,
+      access: "domain",
+      useCatalogTotal: false,
+      skipped: true,
+    };
   }
 
   if (filter.extensions.length) {
@@ -370,6 +409,7 @@ export function buildSalesQuery(filter: SalesFilter): BuiltSql {
     exactDomain,
     exactSld,
     selectivePrefix,
+    boundedResidual,
     extensions: filter.extensions.length > 0,
     priceMin: filter.priceMin != null,
     priceMax: filter.priceMax != null,
@@ -390,7 +430,18 @@ export function buildSalesQuery(filter: SalesFilter): BuiltSql {
     notice,
     access,
     useCatalogTotal: where.length === 0,
+    skipped: false,
   };
+}
+
+function hasIndexedNarrowing(filter: SalesFilter): boolean {
+  return (
+    filter.extensions.length > 0 ||
+    filter.priceMin != null ||
+    filter.priceMax != null ||
+    Boolean(filter.dateFrom) ||
+    Boolean(filter.dateTo)
+  );
 }
 
 export function recentWindow(days: number, asOf = todayUtc()): { from: string; to: string; days: number } {
@@ -406,6 +457,7 @@ function chooseAccess(input: {
   exactDomain: boolean;
   exactSld: boolean;
   selectivePrefix: boolean;
+  boundedResidual: boolean;
   extensions: boolean;
   priceMin: boolean;
   priceMax: boolean;
@@ -413,8 +465,10 @@ function chooseAccess(input: {
   sort: SortKey;
 }): AccessPath {
   if (input.useFts) return "fts";
-  // Exact names and longer prefixes are a small domain-index slice.
+  // Exact names and prefixes are a domain-index slice, including a 1–2 character starts-with.
   if (input.exactDomain || input.exactSld || input.selectivePrefix || input.sort === "domain") return "domain";
+  // A short "ends with" stays on an extension or price index unless a date window already bounds it.
+  if (input.boundedResidual && !input.dateBounded) return input.extensions ? "ext_price" : "price";
   // Price order uses the price index. A date window is the narrower read, so it wins.
   if (input.sort === "price" && !input.dateBounded) return input.extensions ? "ext_price" : "price";
   if (input.sort === "length" && !input.dateBounded) {

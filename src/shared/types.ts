@@ -125,4 +125,6 @@ export interface MetaResponse {
   refreshed_at: string | null;
   /** True when rows have changed since refreshed_at. Search still returns what is loaded. */
   stale: boolean;
+  /** `rebuilt` after a stats write. `skipped` when a public refresh was inside the daily interval. */
+  refresh: "none" | "rebuilt" | "skipped";
 }

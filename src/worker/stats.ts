@@ -1,9 +1,30 @@
-import { foldStats, statsAreStale, type CatalogStats, type StatsGroup } from "../shared/stats";
+import { foldStats, shouldRebuild, statsAreStale, type CatalogStats, type RebuildMode } from "../shared/stats";
 import { clearCountCache } from "./count-cache";
+
+/** No bound parameters. D1 allows at most 100 per statement, and there are more extensions than that. */
+export const INSERT_EXTENSION_STATS_SQL =
+  "INSERT INTO sales_stats_extension (extension, n) SELECT extension, COUNT(*) FROM sales GROUP BY extension";
+
+export const INSERT_VENUE_STATS_SQL =
+  "INSERT INTO sales_stats_venue (venue, n) SELECT venue, COUNT(*) FROM sales GROUP BY venue";
+
+/** The timestamp is the only bound parameter. */
+export const INSERT_SUMMARY_STATS_SQL = `INSERT INTO sales_stats
+  (id, total, estimates, unknown_venues, date_min, date_max, max_id, refreshed_at)
+  SELECT 1,
+         COUNT(*),
+         COALESCE(SUM(price_is_estimate), 0),
+         COALESCE(SUM(CASE WHEN venue = 'Unknown' THEN 1 ELSE 0 END), 0),
+         MIN(date),
+         MAX(date),
+         COALESCE(MAX(id), 0),
+         ?
+  FROM sales`;
 
 export interface StoredStats extends CatalogStats {
   refreshed_at: string;
   stale: boolean;
+  refresh: "none" | "rebuilt" | "skipped";
 }
 
 const ENSURE_SQL = [
@@ -30,18 +51,28 @@ const ENSURE_SQL = [
 let tablesReady = false;
 let refreshInFlight: Promise<void> | null = null;
 
-export async function metaStats(db: D1Database, refresh: boolean): Promise<StoredStats> {
+export async function metaStats(db: D1Database, mode: RebuildMode, now = Date.now()): Promise<StoredStats> {
   await ensureStatsTables(db);
   const existing = await readStats(db);
-  if (refresh || !existing) {
+  const allowed = shouldRebuild(mode, existing?.refreshed_at ?? null, now);
+  let refresh: StoredStats["refresh"] = "none";
+  if (allowed) {
     await refreshStats(db);
+    refresh = "rebuilt";
+  } else if (mode === "public") {
+    refresh = "skipped";
   }
   const stored = await readStats(db);
   const probe = await probeEdges(db);
   if (!stored) {
-    return { ...foldStats([]), refreshed_at: new Date().toISOString(), stale: true };
+    return { ...foldStats([]), refreshed_at: new Date(now).toISOString(), stale: true, refresh };
   }
-  return { ...stored, stale: statsAreStale(stored, probe) };
+  return { ...stored, stale: statsAreStale(stored, probe), refresh };
+}
+
+/** Nightly cron entry. Ignores the public interval. */
+export function rebuildCatalog(db: D1Database): Promise<void> {
+  return refreshStats(db);
 }
 
 /** Exact catalog total when the summary matches the rows currently loaded. */
@@ -76,44 +107,15 @@ async function refreshStats(db: D1Database): Promise<void> {
 }
 
 async function rebuildStats(db: D1Database): Promise<void> {
-  const grouped = await db
-    .prepare(
-      `SELECT extension, venue,
-              COUNT(*) AS n,
-              SUM(price_is_estimate) AS estimates,
-              MIN(date) AS date_min,
-              MAX(date) AS date_max,
-              MAX(id) AS max_id
-       FROM sales
-       GROUP BY extension, venue`,
-    )
-    .all<Record<string, unknown>>();
-  const stats = foldStats(grouped.results.map(asGroup));
   const refreshedAt = new Date().toISOString();
-  const statements = [
+  await db.batch([
     db.prepare("DELETE FROM sales_stats_extension"),
+    db.prepare(INSERT_EXTENSION_STATS_SQL),
     db.prepare("DELETE FROM sales_stats_venue"),
+    db.prepare(INSERT_VENUE_STATS_SQL),
     db.prepare("DELETE FROM sales_stats"),
-    db.prepare(
-      `INSERT INTO sales_stats (id, total, estimates, unknown_venues, date_min, date_max, max_id, refreshed_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(stats.total, stats.estimates, stats.unknown_venues, stats.date_min, stats.date_max, stats.max_id, refreshedAt),
-  ];
-  if (stats.extensions.length) {
-    statements.push(
-      db.prepare(
-        `INSERT INTO sales_stats_extension (extension, n) VALUES ${stats.extensions.map(() => "(?, ?)").join(", ")}`,
-      ).bind(...stats.extensions.flatMap((row) => [row.extension, row.count])),
-    );
-  }
-  if (stats.venues.length) {
-    statements.push(
-      db.prepare(
-        `INSERT INTO sales_stats_venue (venue, n) VALUES ${stats.venues.map(() => "(?, ?)").join(", ")}`,
-      ).bind(...stats.venues.flatMap((row) => [row.venue, row.count])),
-    );
-  }
-  await db.batch(statements);
+    db.prepare(INSERT_SUMMARY_STATS_SQL).bind(refreshedAt),
+  ]);
   clearCountCache();
 }
 
@@ -146,18 +148,6 @@ async function ensureStatsTables(db: D1Database): Promise<void> {
   if (tablesReady) return;
   await db.batch(ENSURE_SQL.map((sql) => db.prepare(sql)));
   tablesReady = true;
-}
-
-function asGroup(row: Record<string, unknown>): StatsGroup {
-  return {
-    extension: asString(row.extension) ?? "",
-    venue: asString(row.venue) ?? "",
-    n: asNumber(row.n),
-    estimates: asNumber(row.estimates),
-    date_min: asString(row.date_min),
-    date_max: asString(row.date_max),
-    max_id: asNumber(row.max_id),
-  };
 }
 
 function asNumber(value: unknown): number {

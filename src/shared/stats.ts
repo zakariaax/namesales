@@ -60,6 +60,27 @@ export function foldStats(groups: StatsGroup[]): CatalogStats {
   };
 }
 
+/** D1 rejects a statement with more than this many bound parameters. */
+export const D1_MAX_SQL_VARIABLES = 100;
+
+/** Public and automatic rebuilds wait this long after the previous one. */
+export const PUBLIC_REBUILD_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+export type RebuildMode = "auto" | "public" | "forced";
+
+/**
+ * `forced` is the admin key or the nightly cron. `auto` is a normal page load.
+ * `public` is `?refresh=1` without the key. Both of those run at most once a day,
+ * and only `auto`/`public` are skipped when a summary was stored recently.
+ */
+export function shouldRebuild(mode: RebuildMode, refreshedAt: string | null, now: number): boolean {
+  if (mode === "forced") return true;
+  if (!refreshedAt) return true;
+  const then = Date.parse(refreshedAt);
+  if (Number.isNaN(then)) return true;
+  return now - then >= PUBLIC_REBUILD_INTERVAL_MS;
+}
+
 /** True when rows have been inserted or removed since the summary was stored. */
 export function statsAreStale(
   stored: { max_id: number; date_max: string | null },
