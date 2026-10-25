@@ -1,4 +1,4 @@
-import { normalizeKeyword } from "./domain";
+import { prefixBounds, sldDomainBounds, normalizeKeyword } from "./domain";
 import { addUtcDays, isIsoDate, todayUtc } from "./dates";
 import type { MatchApplied } from "./types";
 
@@ -31,6 +31,11 @@ export interface SalesFilter {
   pageSize: number;
 }
 
+/** Stop counting once this many matches are confirmed. The UI shows "500+". */
+export const SEARCH_COUNT_CAP = 500;
+
+export type AccessPath = "fts" | "domain" | "ext_price" | "price" | "date";
+
 export interface BuiltSql {
   sql: string;
   countSql: string;
@@ -38,13 +43,22 @@ export interface BuiltSql {
   countBinds: SqlValue[];
   matchApplied: MatchApplied;
   notice: string | null;
+  /** Index that narrows the read. Residual filters sit on top of it. */
+  access: AccessPath;
+  /** No predicate at all, so a cached catalog total is the exact count. */
+  useCatalogTotal: boolean;
 }
 
 type SqlValue = string | number;
 
 const PAGE_SIZES = new Set([25, 50, 100]);
-const MAX_PAGE_OFFSET = 100_000;
+/** Deep OFFSET still reads every skipped row, so pages stop well before the whole catalog. */
+const MAX_PAGE_OFFSET = 2_000;
 const LIKE_LIMIT_BYTES = 50;
+const COUNT_PROBE = SEARCH_COUNT_CAP + 1;
+const TRIM_NOTICE = "The keyword was shortened to fit the 50-byte search limit.";
+const LENGTH_SORT_NOTICE =
+  "Length sort needs a keyword, extension, price, or date filter, so these are the newest sales.";
 
 const SORT_SQL: Record<SortKey, string> = {
   date: "s.date",
@@ -227,46 +241,69 @@ export function filterToParams(filter: SalesFilter): URLSearchParams {
   return params;
 }
 
+export function resultPages(total: number, pageSize: number): number {
+  const reachable = Math.floor(MAX_PAGE_OFFSET / pageSize) + 1;
+  return Math.min(reachable, Math.max(1, Math.ceil(total / pageSize)));
+}
+
 export function buildSalesQuery(filter: SalesFilter): BuiltSql {
   const where: string[] = [];
   const binds: SqlValue[] = [];
   let matchApplied: MatchApplied = "none";
   let notice: string | null = null;
   let useFts = false;
+  let exactDomain = false;
+  let exactSld = false;
+  let selectivePrefix = false;
 
   if (filter.q) {
     const domainQuery = filter.q.includes(".");
-    const column = domainQuery ? "s.domain" : "s.sld";
-    if (filter.match === "exact") {
-      where.push(`${column} = ?`);
+    if (filter.match === "exact" && domainQuery) {
+      where.push("s.domain = ?");
       binds.push(filter.q);
       matchApplied = "exact";
-    } else if (filter.match === "starts" || (filter.match === "contains" && !domainQuery && filter.q.length < 3)) {
-      const pattern = likePattern("prefix", filter.q);
-      where.push(`${column} LIKE ? ESCAPE '\\'`);
-      binds.push(pattern.pattern);
-      matchApplied = "prefix";
-      if (filter.match === "contains") {
-        notice = "Names are matched from the start when the keyword is shorter than 3 characters.";
-      }
-      if (pattern.trimmed) notice = "The keyword was shortened to fit the 50-byte search limit.";
-    } else if (filter.match === "ends") {
-      const pattern = likePattern("suffix", filter.q);
-      where.push(`${column} LIKE ? ESCAPE '\\'`);
-      binds.push(pattern.pattern);
-      matchApplied = "suffix";
-      if (pattern.trimmed) notice = "The keyword was shortened to fit the 50-byte search limit.";
-    } else if (!domainQuery && filter.q.length >= 3) {
+      exactDomain = true;
+    } else if (filter.match === "exact") {
+      const bounds = sldDomainBounds(filter.q);
+      where.push("s.domain >= ? AND s.domain < ?");
+      binds.push(bounds.low, bounds.high);
+      matchApplied = "exact";
+      exactSld = true;
+    } else if (!domainQuery && filter.match === "contains" && filter.q.length >= 3) {
       where.push("sales_fts MATCH ?");
       binds.push(ftsPhrase(filter.q));
       matchApplied = "fts";
       useFts = true;
+    } else if (!domainQuery && filter.match === "ends" && filter.q.length >= 3) {
+      where.push("sales_fts MATCH ?");
+      binds.push(ftsPhrase(filter.q));
+      const pattern = likePattern("suffix", filter.q);
+      where.push("s.sld LIKE ? ESCAPE '\\'");
+      binds.push(pattern.pattern);
+      matchApplied = "suffix";
+      useFts = true;
+      if (pattern.trimmed) notice = TRIM_NOTICE;
+    } else if (filter.match === "starts" || (!domainQuery && filter.match === "contains")) {
+      const bounds = prefixBounds(filter.q);
+      where.push("s.domain >= ? AND s.domain < ?");
+      binds.push(bounds.low, bounds.high);
+      matchApplied = "prefix";
+      selectivePrefix = filter.q.length >= 3;
+      if (filter.match === "contains") {
+        notice = "Names are matched from the start when the keyword is shorter than 3 characters.";
+      }
+    } else if (filter.match === "ends") {
+      const pattern = likePattern("suffix", filter.q);
+      where.push(`${domainQuery ? "s.domain" : "s.sld"} LIKE ? ESCAPE '\\'`);
+      binds.push(pattern.pattern);
+      matchApplied = "suffix";
+      if (pattern.trimmed) notice = TRIM_NOTICE;
     } else {
       const pattern = likePattern("contains", filter.q);
-      where.push(`${column} LIKE ? ESCAPE '\\'`);
+      where.push("s.domain LIKE ? ESCAPE '\\'");
       binds.push(pattern.pattern);
       matchApplied = "like";
-      if (pattern.trimmed) notice = "The keyword was shortened to fit the 50-byte search limit.";
+      if (pattern.trimmed) notice = TRIM_NOTICE;
     }
   }
 
@@ -310,18 +347,49 @@ export function buildSalesQuery(filter: SalesFilter): BuiltSql {
   if (filter.precision === "day") where.push("s.date_precision = 'day'");
   if (filter.precision === "month") where.push("s.date_precision = 'month'");
 
-  const from = useFts ? "sales s JOIN sales_fts ON sales_fts.rowid = s.id" : "sales s";
+  let sort = filter.sort;
+  let dir = filter.dir;
+  const narrowed =
+    useFts ||
+    exactDomain ||
+    exactSld ||
+    selectivePrefix ||
+    filter.extensions.length > 0 ||
+    filter.priceMin != null ||
+    filter.priceMax != null ||
+    Boolean(filter.dateFrom) ||
+    Boolean(filter.dateTo);
+  if (sort === "length" && !narrowed) {
+    sort = "date";
+    dir = "desc";
+    notice = notice ? `${notice} ${LENGTH_SORT_NOTICE}` : LENGTH_SORT_NOTICE;
+  }
+
+  const access = chooseAccess({
+    useFts,
+    exactDomain,
+    exactSld,
+    selectivePrefix,
+    extensions: filter.extensions.length > 0,
+    priceMin: filter.priceMin != null,
+    priceMax: filter.priceMax != null,
+    dateBounded: Boolean(filter.dateFrom) || Boolean(filter.dateTo),
+    sort,
+  });
+  const from = fromClause(access);
   const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
-  const order = orderBy(filter.sort, filter.dir);
+  const order = orderBy(sort, dir);
   const offset = (filter.page - 1) * filter.pageSize;
 
   return {
     sql: `SELECT s.* FROM ${from}${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`,
-    countSql: `SELECT COUNT(*) AS n FROM ${from}${whereSql}`,
+    countSql: `SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${from}${whereSql} LIMIT ${COUNT_PROBE}) AS capped`,
     binds: [...binds, filter.pageSize, offset],
     countBinds: binds,
     matchApplied,
     notice,
+    access,
+    useCatalogTotal: where.length === 0,
   };
 }
 
@@ -331,6 +399,43 @@ export function recentWindow(days: number, asOf = todayUtc()): { from: string; t
   }
   if (!isIsoDate(asOf)) throw new Error("as_of must be YYYY-MM-DD.");
   return { from: addUtcDays(asOf, -days), to: asOf, days };
+}
+
+function chooseAccess(input: {
+  useFts: boolean;
+  exactDomain: boolean;
+  exactSld: boolean;
+  selectivePrefix: boolean;
+  extensions: boolean;
+  priceMin: boolean;
+  priceMax: boolean;
+  dateBounded: boolean;
+  sort: SortKey;
+}): AccessPath {
+  if (input.useFts) return "fts";
+  // Exact names and longer prefixes are a small domain-index slice.
+  if (input.exactDomain || input.exactSld || input.selectivePrefix || input.sort === "domain") return "domain";
+  // Price order uses the price index. A date window is the narrower read, so it wins.
+  if (input.sort === "price" && !input.dateBounded) return input.extensions ? "ext_price" : "price";
+  if (input.sort === "length" && !input.dateBounded) {
+    if (input.extensions || input.priceMin || input.priceMax) return input.extensions ? "ext_price" : "price";
+  }
+  return "date";
+}
+
+function fromClause(access: AccessPath): string {
+  switch (access) {
+    case "fts":
+      return "sales s JOIN sales_fts ON sales_fts.rowid = s.id";
+    case "domain":
+      return "sales s INDEXED BY idx_sales_domain";
+    case "ext_price":
+      return "sales s INDEXED BY idx_sales_ext_price";
+    case "price":
+      return "sales s INDEXED BY idx_sales_price";
+    case "date":
+      return "sales s INDEXED BY idx_sales_date";
+  }
 }
 
 function orderBy(sort: SortKey, dir: SortDir): string {

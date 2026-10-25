@@ -15,8 +15,21 @@ describe("schema", () => {
       expect(ddl).toContain(column);
     }
     expect(ddl).toContain("tokenize='trigram'");
+    expect(ddl).toContain("columnsize=0");
     expect(ddl).toContain("CREATE TRIGGER sales_ai");
     expect(schema).not.toMatch(/BEGIN TRANSACTION/);
+    expect(ddl.match(/CREATE INDEX \w+/g)).toEqual([
+      "CREATE INDEX idx_sales_domain",
+      "CREATE INDEX idx_sales_date",
+      "CREATE INDEX idx_sales_price",
+      "CREATE INDEX idx_sales_ext_price",
+    ]);
+    expect(ddl).not.toContain("idx_sales_sld");
+    expect(ddl).not.toContain("idx_sales_length");
+    expect(ddl).not.toContain("idx_sales_venue");
+    expect(ddl).not.toContain("idx_sales_date_price");
+    expect(ddl).not.toContain("idx_sales_venue_date");
+    expect(ddl).toContain("ON sales(extension, price_usd)");
   });
 });
 

@@ -9,14 +9,14 @@ export function Filters({
   state,
   meta,
   open,
-  total,
+  totalLabel,
   onClose,
   onChange,
 }: {
   state: PageState;
   meta: MetaResponse | null;
   open: boolean;
-  total: number | null;
+  totalLabel: string | null;
   onClose: () => void;
   onChange: (next: PageState) => void;
 }) {
@@ -38,7 +38,7 @@ export function Filters({
   return (
     <div className={open ? "filter-panel open" : "filter-panel"} id="filters">
       <div className="drawer-head">
-        <strong>{total == null ? "Filters" : `${total.toLocaleString("en-US")} sales`}</strong>
+        <strong>{totalLabel ?? "Filters"}</strong>
         <button type="button" className="text-button" onClick={onClose}>Done</button>
       </div>
 

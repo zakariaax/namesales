@@ -1,32 +1,35 @@
 import { Hono } from "hono";
-import { domainComps, domainSales, filterFromUrl, healthCount, meta, searchSales } from "./db";
+import { domainComps, domainSales, filterFromUrl, healthStatus, meta, searchSales } from "./db";
 import type { Env } from "./env";
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.get("/api/health", async (c) => {
-  const sales = await healthCount(c.env.DB);
-  return json({ ok: true, sales });
+app.get("/api/health", async (c) => json(await healthStatus(c.env.DB)));
+
+app.get("/api/meta", async (c) => {
+  const refresh = new URL(c.req.url).searchParams.get("refresh") === "1";
+  return json(await meta(c.env.DB, refresh));
 });
 
-app.get("/api/meta", async (c) => json(await meta(c.env.DB)));
-
 app.get("/api/search", async (c) => {
-  const parsed = filterFromUrl(new URL(c.req.url), "search");
+  const url = new URL(c.req.url);
+  const parsed = filterFromUrl(url, "search");
   if ("error" in parsed) return bad(parsed.error);
-  return json(await searchSales(c.env.DB, parsed.filter));
+  return json(await searchSales(c.env.DB, parsed.filter, undefined, url.origin));
 });
 
 app.get("/api/feeds/top", async (c) => {
-  const parsed = filterFromUrl(new URL(c.req.url), "top");
+  const url = new URL(c.req.url);
+  const parsed = filterFromUrl(url, "top");
   if ("error" in parsed) return bad(parsed.error);
-  return json(await searchSales(c.env.DB, parsed.filter));
+  return json(await searchSales(c.env.DB, parsed.filter, undefined, url.origin));
 });
 
 app.get("/api/feeds/recent", async (c) => {
-  const parsed = filterFromUrl(new URL(c.req.url), "recent");
+  const url = new URL(c.req.url);
+  const parsed = filterFromUrl(url, "recent");
   if ("error" in parsed) return bad(parsed.error);
-  return json(await searchSales(c.env.DB, parsed.filter, parsed.window));
+  return json(await searchSales(c.env.DB, parsed.filter, parsed.window, url.origin));
 });
 
 app.get("/api/domains/*", async (c) => {

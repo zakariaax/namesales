@@ -15,6 +15,27 @@ export function normalizeDomain(raw: string): string | null {
   return domain;
 }
 
+/** Exclusive upper bound so `domain >= low AND domain < high` is a prefix range. */
+export function prefixBounds(prefix: string): { low: string; high: string } {
+  return { low: prefix, high: prefixUpperBound(prefix) };
+}
+
+/** Every domain with this sld: `example.com`, `example.co.uk`, and resales of each. */
+export function sldDomainBounds(sld: string): { low: string; high: string } {
+  return { low: `${sld}.`, high: `${sld}/` };
+}
+
+function prefixUpperBound(prefix: string): string {
+  const codes = [...prefix].map((char) => char.charCodeAt(0));
+  for (let index = codes.length - 1; index >= 0; index--) {
+    if (codes[index] < 0x7f) {
+      codes[index] += 1;
+      return String.fromCharCode(...codes.slice(0, index + 1));
+    }
+  }
+  return `${prefix}\u007f`;
+}
+
 export function normalizeKeyword(raw: string): string {
   let keyword = raw.trim().toLowerCase().replace(/\s+/g, "");
   if (!keyword) return "";

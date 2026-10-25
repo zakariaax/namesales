@@ -1,38 +1,72 @@
-import { normalizeDomain } from "../shared/domain";
+import { normalizeDomain, sldDomainBounds } from "../shared/domain";
 import {
+  SEARCH_COUNT_CAP,
   buildSalesQuery,
   parseFilter,
   recentWindow,
+  resultPages,
   type SalesFilter,
 } from "../shared/search";
+import { interpretCount } from "../shared/stats";
 import type { CompsResponse, DomainResponse, MetaResponse, Sale, SearchResponse } from "../shared/types";
+import { cachedCount } from "./count-cache";
 import type { Env } from "./env";
+import { freshCatalogTotal, metaStats, probeEdges } from "./stats";
 
 /** No DISTINCT, GROUP BY, or LIMIT. Resales of one domain all come back, newest first. */
 export const DOMAIN_SALES_SQL =
-  "SELECT * FROM sales WHERE domain = ? ORDER BY date DESC, price_usd DESC, id DESC";
+  "SELECT * FROM sales INDEXED BY idx_sales_domain WHERE domain = ? ORDER BY date DESC, price_usd DESC, id DESC";
+
+const SAME_NAME_SQL = `SELECT * FROM sales INDEXED BY idx_sales_domain
+ WHERE domain >= ? AND domain < ? AND domain != ?
+ ORDER BY date DESC, price_usd DESC, id DESC
+ LIMIT 12`;
+
+const SIMILAR_LENGTH_SQL = `SELECT * FROM sales INDEXED BY idx_sales_date
+ WHERE extension = ? AND length BETWEEN ? AND ? AND sld != ?
+ ORDER BY date DESC, price_usd DESC, id DESC
+ LIMIT 24`;
+
+const NEARBY_ABOVE_SQL = `SELECT * FROM sales INDEXED BY idx_sales_ext_price
+ WHERE extension = ? AND price_is_estimate = 0 AND price_usd >= ? AND price_usd <= ? AND sld != ?
+ ORDER BY price_usd ASC
+ LIMIT 20`;
+
+const NEARBY_BELOW_SQL = `SELECT * FROM sales INDEXED BY idx_sales_ext_price
+ WHERE extension = ? AND price_is_estimate = 0 AND price_usd >= ? AND price_usd < ? AND sld != ?
+ ORDER BY price_usd DESC
+ LIMIT 20`;
 
 type SqlValue = string | number;
 
-export async function searchSales(db: D1Database, filter: SalesFilter, extra?: SearchResponse["window"]): Promise<SearchResponse> {
+export async function searchSales(
+  db: D1Database,
+  filter: SalesFilter,
+  extra?: SearchResponse["window"],
+  origin?: string,
+): Promise<SearchResponse> {
   const built = buildSalesQuery(filter);
   const started = Date.now();
-  const [page, count] = await db.batch([
-    db.prepare(built.sql).bind(...built.binds),
-    db.prepare(built.countSql).bind(...built.countBinds),
+  const [page, counted] = await Promise.all([
+    db.prepare(built.sql).bind(...built.binds).all<Sale>(),
+    resolveCount(db, built, origin),
   ]);
-  const total = numberField(count.results[0], "n");
-  const pages = Math.max(1, Math.ceil(total / filter.pageSize));
+  const notice = counted.exact
+    ? built.notice
+    : [built.notice, `More than ${SEARCH_COUNT_CAP.toLocaleString("en-US")} sales match. Add a filter to narrow them.`]
+        .filter(Boolean)
+        .join(" ");
   return {
-    total,
+    total: counted.total,
+    total_exact: counted.exact,
     page: filter.page,
     page_size: filter.pageSize,
-    pages,
+    pages: resultPages(counted.total, filter.pageSize),
     elapsed_ms: Date.now() - started,
     match_applied: built.matchApplied,
-    notice: built.notice,
+    notice,
     window: extra,
-    results: page.results as Sale[],
+    results: page.results,
   };
 }
 
@@ -68,12 +102,8 @@ export async function domainComps(db: D1Database, rawDomain: string): Promise<Co
   const basis = detail.sales[0];
   const seen = new Set<number>(detail.sales.map((sale) => sale.id));
 
-  const sameName = await all<Sale>(
-    db,
-    `SELECT * FROM sales WHERE sld = ? AND domain != ?
-     ORDER BY date DESC, price_usd DESC, id DESC LIMIT 12`,
-    [basis.sld, basis.domain],
-  );
+  const sameBounds = sldDomainBounds(basis.sld);
+  const sameName = await all<Sale>(db, SAME_NAME_SQL, [sameBounds.low, sameBounds.high, basis.domain]);
   for (const sale of sameName) seen.add(sale.id);
 
   const keyword = await similarKeyword(db, basis);
@@ -82,14 +112,7 @@ export async function domainComps(db: D1Database, rawDomain: string): Promise<Co
   const low = Math.max(1, basis.length - 1);
   const high = basis.length + 1;
   const similarLength = takeNew(
-    await all<Sale>(
-      db,
-      `SELECT * FROM sales
-       WHERE extension = ? AND length BETWEEN ? AND ? AND sld != ?
-       ORDER BY date DESC, price_usd DESC, id DESC
-       LIMIT 24`,
-      [basis.extension, low, high, basis.sld],
-    ),
+    await all<Sale>(db, SIMILAR_LENGTH_SQL, [basis.extension, low, high, basis.sld]),
     seen,
     8,
   );
@@ -106,42 +129,26 @@ export async function domainComps(db: D1Database, rawDomain: string): Promise<Co
   };
 }
 
-export async function meta(db: D1Database): Promise<MetaResponse> {
-  const [extensions, venues, summary] = await db.batch([
-    db.prepare(
-      `SELECT extension, COUNT(*) AS n FROM sales GROUP BY extension ORDER BY n DESC, extension ASC`,
-    ),
-    db.prepare(`SELECT venue, COUNT(*) AS n FROM sales GROUP BY venue ORDER BY n DESC, venue ASC`),
-    db.prepare(
-      `SELECT COUNT(*) AS total,
-              COALESCE(SUM(price_is_estimate), 0) AS estimates,
-              COALESCE(SUM(CASE WHEN venue = 'Unknown' THEN 1 ELSE 0 END), 0) AS unknown_venues,
-              MIN(date) AS date_min,
-              MAX(date) AS date_max
-       FROM sales`,
-    ),
-  ]);
-  const summaryRow = (summary.results[0] ?? {}) as Record<string, unknown>;
+export async function meta(db: D1Database, refresh = false): Promise<MetaResponse> {
+  const stats = await metaStats(db, refresh);
   return {
-    total: numberField(summaryRow, "total"),
-    estimates: numberField(summaryRow, "estimates"),
-    unknown_venues: numberField(summaryRow, "unknown_venues"),
-    date_min: stringOrNull(summaryRow.date_min),
-    date_max: stringOrNull(summaryRow.date_max),
-    extensions: (extensions.results as { extension: string; n: number }[]).map((row) => ({
-      extension: row.extension,
-      count: row.n,
-    })),
-    venues: (venues.results as { venue: string; n: number }[]).map((row) => ({
-      venue: row.venue,
-      count: row.n,
-    })),
+    total: stats.total,
+    estimates: stats.estimates,
+    unknown_venues: stats.unknown_venues,
+    date_min: stats.date_min,
+    date_max: stats.date_max,
+    extensions: stats.extensions,
+    venues: stats.venues,
+    refreshed_at: stats.refreshed_at,
+    stale: stats.stale,
   };
 }
 
-export async function healthCount(db: D1Database): Promise<number> {
-  const row = await db.prepare("SELECT COUNT(*) AS n FROM sales").first<{ n: number }>();
-  return row?.n ?? 0;
+/** Cheap liveness check. `sales` is the cached catalog total, or null when that cache lags the load. */
+export async function healthStatus(db: D1Database): Promise<{ ok: true; sales: number | null; stale: boolean }> {
+  const edges = await probeEdges(db);
+  const total = await freshCatalogTotal(db, Promise.resolve(edges));
+  return { ok: true, sales: total, stale: total == null && (edges.max_id != null || edges.date_max != null) };
 }
 
 export function filterFromUrl(url: URL, preset: "search" | "top" | "recent"): { filter: SalesFilter; window?: SearchResponse["window"] } | { error: string } {
@@ -188,17 +195,6 @@ async function similarKeyword(db: D1Database, basis: Sale): Promise<Sale[]> {
       )),
     );
   }
-  if (stem.length >= 5) {
-    const prefix = `${escapeLike(basis.sld.slice(0, 5))}%`;
-    rows.push(
-      ...(await all<Sale>(
-        db,
-        `SELECT * FROM sales WHERE sld LIKE ? ESCAPE '\\' AND sld != ?
-         ORDER BY date DESC LIMIT 80`,
-        [prefix, basis.sld],
-      )),
-    );
-  }
   const ranked = rows
     .filter((sale, index) => rows.findIndex((other) => other.id === sale.id) === index)
     .filter((sale) => keywordClose(stem, sale.sld))
@@ -211,16 +207,17 @@ async function nearbyPrice(db: D1Database, basis: Sale): Promise<Sale[]> {
   if (anchor <= 0) return [];
   const low = Math.max(1, Math.floor(anchor * 0.7));
   const high = Math.ceil(anchor * 1.3);
-  return all<Sale>(
-    db,
-    `SELECT * FROM sales
-     WHERE extension = ?
-       AND price_is_estimate = 0
-       AND price_usd BETWEEN ? AND ?
-       AND sld != ?
-     ORDER BY ABS(price_usd - ?) ASC, date DESC
-     LIMIT 16`,
-    [basis.extension, low, high, basis.sld, anchor],
+  const [above, below] = await Promise.all([
+    all<Sale>(db, NEARBY_ABOVE_SQL, [basis.extension, anchor, high, basis.sld]),
+    all<Sale>(db, NEARBY_BELOW_SQL, [basis.extension, low, anchor, basis.sld]),
+  ]);
+  const merged = new Map<number, Sale>();
+  for (const sale of [...above, ...below]) merged.set(sale.id, sale);
+  return [...merged.values()].sort(
+    (left, right) =>
+      Math.abs(left.price_usd - anchor) - Math.abs(right.price_usd - anchor) ||
+      right.date.localeCompare(left.date) ||
+      right.id - left.id,
   );
 }
 
@@ -244,23 +241,29 @@ function takeNew(rows: Sale[], seen: Set<number>, limit: number): Sale[] {
   return kept;
 }
 
-function escapeLike(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+async function resolveCount(
+  db: D1Database,
+  built: ReturnType<typeof buildSalesQuery>,
+  origin: string | undefined,
+): Promise<{ total: number; exact: boolean }> {
+  // The latest id is one primary-key lookup. It keeps a cached count from
+  // describing a table that has since gained a row.
+  const probe = probeEdges(db);
+  if (built.useCatalogTotal) {
+    const catalog = await freshCatalogTotal(db, probe);
+    if (catalog != null) return { total: catalog, exact: true };
+  }
+  const edges = await probe;
+  const key = `${edges.max_id ?? 0}|${edges.date_max ?? ""}\n${built.countSql}\n${JSON.stringify(built.countBinds)}`;
+  return cachedCount(origin, key, async () => {
+    const count = await db.prepare(built.countSql).bind(...built.countBinds).first<{ n: number }>();
+    return interpretCount(count?.n ?? 0, SEARCH_COUNT_CAP);
+  });
 }
 
 async function all<T>(db: D1Database, sql: string, binds: SqlValue[]): Promise<T[]> {
   const result = await db.prepare(sql).bind(...binds).all<T>();
   return result.results;
-}
-
-function numberField(row: unknown, key: string): number {
-  if (!row || typeof row !== "object") return 0;
-  const value = (row as Record<string, unknown>)[key];
-  return typeof value === "number" ? value : Number(value ?? 0);
-}
-
-function stringOrNull(value: unknown): string | null {
-  return typeof value === "string" ? value : null;
 }
 
 export type WorkerEnv = Env;

@@ -1,7 +1,7 @@
 -- NameSales initial migration.
--- DDL matches schema.sql (the prepared dataset schema) exactly.
--- schema.sql also drops existing tables; this migration does not, because
--- Wrangler applies it once to an empty database.
+-- The DDL below matches schema.sql exactly (from CREATE TABLE through the triggers).
+-- schema.sql also drops existing tables; Wrangler applies this file once to an empty
+-- database, so those drops are omitted here.
 -- domain is not unique. The same name can sell again on a later date.
 
 CREATE TABLE sales (
@@ -32,21 +32,20 @@ CREATE TABLE sales (
   tld_levels        INTEGER NOT NULL DEFAULT 1    -- 1 = .com, 2 = .co.uk
 );
 
-CREATE INDEX idx_sales_domain     ON sales(domain);
-CREATE INDEX idx_sales_sld        ON sales(sld);
-CREATE INDEX idx_sales_extension  ON sales(extension);
-CREATE INDEX idx_sales_date       ON sales(date);
-CREATE INDEX idx_sales_price      ON sales(price_usd);
-CREATE INDEX idx_sales_length     ON sales(length);
-CREATE INDEX idx_sales_venue      ON sales(venue);
--- composites for the common browse/filter paths
-CREATE INDEX idx_sales_ext_price  ON sales(extension, price_usd DESC);
-CREATE INDEX idx_sales_date_price ON sales(date, price_usd DESC);
-CREATE INDEX idx_sales_venue_date ON sales(venue, date);
+-- Write cost per inserted sale = 1 (table row) + 1 per secondary index + FTS (amortised, no docsize rows).
+-- Only 4 secondary indexes are kept (each one costs +1 row written per sale on D1):
+CREATE INDEX idx_sales_domain     ON sales(domain);                    -- domain detail page / exact lookup / future dedupe
+CREATE INDEX idx_sales_date       ON sales(date);                      -- newest sales, date-range lists (top last N days)
+CREATE INDEX idx_sales_price      ON sales(price_usd);                 -- all-time / any-ext leaderboards ORDER BY price DESC
+CREATE INDEX idx_sales_ext_price  ON sales(extension, price_usd);      -- extension filter + price range / sort (scans either direction)
+-- Dropped vs v1 (filter these in combination with the indexes above instead):
+--   sld (use FTS or domain), extension (covered by ext_price prefix), length, venue, date_price, venue_date.
 
--- Substring keyword search on sld (trigram: matches any 3+ char substring, e.g. 'crypt' -> encrypted.com)
+-- Substring keyword search on sld (trigram: any 3+ char substring, e.g. 'crypt' -> encrypted.com).
+-- columnsize=0 drops the per-row sales_fts_docsize table (saves 1 row written per sale; bm25 ranking not needed).
+-- Query:  ... FROM sales_fts f JOIN sales s ON s.id=f.rowid WHERE sales_fts MATCH '"crypto"'   (or f.sld LIKE '%crypto%')
 CREATE VIRTUAL TABLE sales_fts USING fts5(
-  sld, content='sales', content_rowid='id', tokenize='trigram'
+  sld, content='sales', content_rowid='id', tokenize='trigram', columnsize=0
 );
 CREATE TRIGGER sales_ai AFTER INSERT ON sales BEGIN
   INSERT INTO sales_fts(rowid, sld) VALUES (new.id, new.sld);

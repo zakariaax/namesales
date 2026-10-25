@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CompsResponse, DomainResponse, SearchResponse } from "../src/shared/types";
+import type { CompsResponse, DomainResponse, MetaResponse, SearchResponse } from "../src/shared/types";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const port = 8791;
@@ -85,8 +85,14 @@ async function main() {
   try {
     await waitForServer(child);
     const sampleLines = readFileSync(join(root, "fixtures", "sample-sales.csv"), "utf8").trim().split("\n").length - 1;
-    const health = await getJson<{ ok: boolean; sales: number }>("/api/health");
-    assert(health.ok && health.sales === sampleLines, `expected ${sampleLines} sales, got ${health.sales}`);
+    const health = await getJson<{ ok: boolean; sales: number | null }>("/api/health");
+    assert(health.ok, "health check failed");
+    const meta = await getJson<MetaResponse>("/api/meta?refresh=1");
+    assert(meta.total === sampleLines, `expected ${sampleLines} sales in the summary, got ${meta.total}`);
+    assert(meta.stale === false, "summary should match the rows just loaded");
+    assert(meta.extensions.some((row) => row.extension === ".com" && row.count > 0), "extension summary was empty");
+    const healthAfter = await getJson<{ ok: boolean; sales: number | null; stale: boolean }>("/api/health");
+    assert(healthAfter.sales === sampleLines && healthAfter.stale === false, `health total was ${healthAfter.sales}`);
 
     const fts = await getJson<SearchResponse>("/api/search?q=lane&match=contains&page_size=100");
     assert(fts.match_applied === "fts", "3+ character search should use FTS");

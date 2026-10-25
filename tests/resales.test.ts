@@ -18,6 +18,7 @@ describe("resales", () => {
 
   it("loads every resale of a domain", () => {
     expect(DOMAIN_SALES_SQL).not.toMatch(/DISTINCT|GROUP BY|LIMIT/i);
+    expect(DOMAIN_SALES_SQL).toContain("INDEXED BY idx_sales_domain");
     expect(DOMAIN_SALES_SQL).toContain("ORDER BY date DESC");
 
     const header = SALE_COLUMNS.join(",");

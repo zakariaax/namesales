@@ -24,6 +24,8 @@ export function SearchPage() {
   const [loading, setLoading] = useState(parsed.ok);
   const [drawer, setDrawer] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (parsed.ok) setDraft(parsed.state.filter.q);
@@ -53,7 +55,7 @@ export function SearchPage() {
         setLoading(false);
       });
     return () => controller.abort();
-  }, [query]);
+  }, [query, reloadKey]);
 
   useEffect(() => {
     const view = parsed.ok ? parsed.state.view : "search";
@@ -84,6 +86,19 @@ export function SearchPage() {
     const nextParams = writePage(next);
     if (nextParams.toString() === params.toString()) return;
     setParams(nextParams);
+  };
+
+  const refreshCounts = async () => {
+    setRefreshing(true);
+    try {
+      const next = await getJson<MetaResponse>("/api/meta?refresh=1");
+      setMeta(next);
+      setReloadKey((value) => value + 1);
+    } catch {
+      /* The stale note stays up so the refresh can be tried again. */
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   const reset = () => {
@@ -177,7 +192,7 @@ export function SearchPage() {
             state={state}
             meta={meta}
             open={drawer}
-            total={data?.total ?? null}
+            totalLabel={data ? `${formatResultCount(data.total, data.total_exact)} ${data.total === 1 && data.total_exact ? "sale" : "sales"}` : null}
             onClose={() => setDrawer(false)}
             onChange={commit}
           />
@@ -189,7 +204,7 @@ export function SearchPage() {
         <p>
           {data ? (
             <>
-              <strong>{data.total.toLocaleString("en-US")}</strong> {data.total === 1 ? "sale" : "sales"}
+              <strong>{formatResultCount(data.total, data.total_exact)}</strong> {data.total === 1 && data.total_exact ? "sale" : "sales"}
               <span className="elapsed">{data.elapsed_ms} ms</span>
             </>
           ) : (
@@ -233,6 +248,14 @@ export function SearchPage() {
         </div>
       </div>
 
+      {meta?.stale && (
+        <p className="notice">
+          Counts lag the sales loaded so far.
+          <button type="button" className="text-button" onClick={() => void refreshCounts()} disabled={refreshing}>
+            {refreshing ? "Refreshing" : "Refresh counts"}
+          </button>
+        </p>
+      )}
       {data?.notice && <p className="notice">{data.notice}</p>}
       {data?.window && (
         <p className="notice">
@@ -261,6 +284,11 @@ export function SearchPage() {
       )}
     </main>
   );
+}
+
+function formatResultCount(total: number, exact: boolean): string {
+  const text = total.toLocaleString("en-US");
+  return exact ? text : `${text}+`;
 }
 
 function countFilters(state: PageState): number {
