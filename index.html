@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NameSales</title>
+    <meta
+      name="description"
+      content="NameSales is a domain sales database. Search exact prices and reported ranges."
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <style>
+      html { background: #f3f0e8; color: #1c1915; }
+      html[data-theme="dark"] { background: #101311; color: #f2eee6; }
+    </style>
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("namesales-theme");
+          var theme = stored === "light" || stored === "dark"
+            ? stored
+            : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+          document.documentElement.dataset.theme = theme;
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/client/main.tsx"></script>
+  </body>
+</html>

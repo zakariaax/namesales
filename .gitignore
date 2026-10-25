@@ -1,0 +1,14 @@
+node_modules
+dist
+.wrangler
+.dev.vars
+.seed-chunks
+*.log
+.DS_Store
+
+# Real sales data stays out of this public repo.
+namesales-data
+sales.csv
+seed/
+*.db
+*.sqlite

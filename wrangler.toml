@@ -1,0 +1,19 @@
+name = "namesales"
+main = "src/worker/index.ts"
+compatibility_date = "2026-10-25"
+
+# Replace database_id after `npx wrangler d1 create namesales`.
+# The placeholder is enough for `wrangler dev` and a local D1 database.
+[[d1_databases]]
+binding = "DB"
+database_name = "namesales"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+# /domain/example.co.uk must hit the Worker. The asset router treats the
+# dotted path as a missing file and would not serve the SPA shell.
+run_worker_first = [ "/api/*", "/domain", "/domain/*" ]
