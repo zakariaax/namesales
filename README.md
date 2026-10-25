@@ -55,7 +55,27 @@ The table matches the prepared dataset:
 - About 71% of venues are `Unknown`. The UI shows that as “not reported” (an em dash in the table) instead of treating it like a marketplace.
 - **Top sales** (`/api/feeds/top`) and **last N days** (`/api/feeds/recent`) exclude estimates by default. The recent feed also requires `date_precision = 'day'`, so month rows pinned to the 1st do not fall into the window. Pass `estimates=include` and, for the recent feed, `precision=any` to put them back. The same toggles are on the Top sales and Recent views.
 
-Keyword search uses the FTS5 trigram index when the term is at least 3 characters (`MATCH '"crypto"'`). Shorter terms use a prefix (`sld LIKE 'ab%'`). D1 limits `LIKE` patterns to 50 bytes; longer input is trimmed.
+Keyword search uses the FTS5 trigram index when the term is at least 3 characters (`MATCH '"crypto"'`). Starts with and exact use a range on the domain index, including a one- or two-character prefix. Contains and ends with need 3 characters unless you also set an extension, price range, or date range. D1 limits `LIKE` patterns to 50 bytes; longer input is trimmed.
+
+## Indexes, counts, and partial loads
+
+D1's free plan allows 100,000 rows written per day and 5 million rows read per day. Each secondary index costs another row write per sale, so the table keeps four: `domain`, `date`, `price_usd`, and `(extension, price_usd)`. The FTS index uses `columnsize=0`, which skips the per-row docsize table. There is still no unique constraint on `domain`.
+
+Apply the migrations on an empty database, then load. `0002_free_plan.sql` drops the earlier extra indexes and rebuilds FTS with `columnsize=0`. That rebuild is cheap on an empty table and expensive after 226k rows are already loaded.
+
+Queries take one of those indexes (or FTS) as the access path and apply length, venue, hyphen, digit, estimate, and precision filters on top. Every search has `LIMIT`/`OFFSET`, and offset stops at 2,000 rows. Match counts stop after 500 rows (`500+` in the UI) instead of `COUNT(*)` on the whole table. The unfiltered catalog total comes from `sales_stats`, `sales_stats_extension`, and `sales_stats_venue`.
+
+Those summary tables are not updated on every insert. A Worker cron at 01:30 UTC rebuilds them (`[triggers] crons` in `wrangler.toml`). Cron triggers are free. A normal `/api/meta` request rebuilds only when the summary is missing or older than 24 hours, so a public page load cannot scan the table all day.
+
+A manual rebuild needs `ADMIN_KEY`, set with `npx wrangler secret put ADMIN_KEY` (or `.dev.vars` locally, which is gitignored):
+
+```bash
+curl -s "http://127.0.0.1:8787/api/meta?refresh=1&key=$ADMIN_KEY"
+```
+
+`?refresh=1` without the key is ignored when a rebuild already ran in the last 24 hours. The extension and venue inserts are `INSERT … SELECT … GROUP BY` with no bound parameters, because D1 allows at most 100 parameters per statement.
+
+Later `/api/meta` calls read the summary and compare `MAX(id)` and `MAX(date)` (index lookups). When a load adds rows, the app marks the counts stale and keeps serving search, domain history, and comps from whatever is already loaded. Newest-first loads show up in the default date sort immediately. The banner says the counts catch up at the nightly refresh.
 
 ## Load the full dataset
 
@@ -87,7 +107,7 @@ npx wrangler d1 execute namesales --local \
   --command "SELECT COUNT(*) AS sales FROM sales; SELECT COUNT(*) AS fts FROM sales_fts;"
 ```
 
-Both counts should be 225,029.
+Both counts should match the rows loaded so far (225,029 once the full set is in). `COUNT(*)` reads every row, so run it once to confirm a load, not on each request. Day to day, the cron-built summary is the count the app uses. The app keeps working while chunks are still loading.
 
 ## API
 
@@ -98,8 +118,9 @@ Both counts should be 225,029.
 | GET | `/api/feeds/recent` | `days` (default 30), `as_of` optional. Estimates and month-only dates excluded unless opted in |
 | GET | `/api/domains/:domain` | Every recorded sale of that domain |
 | GET | `/api/domains/:domain/comps` | Other extensions, similar names, similar length, nearby exact prices |
-| GET | `/api/meta` | Extension and venue facets |
-| GET | `/api/health` | Row count |
+| GET | `/api/meta` | Cached extension and venue facets. `?refresh=1&key=` rebuilds them when the key matches `ADMIN_KEY`. Without the key, at most once per day |
+| GET | `/api/extensions` | Extension names and sale counts from `sales_stats_extension` only. `Cache-Control: public, max-age=3600` |
+| GET | `/api/health` | Liveness. `sales` is the cached total, or null when that cache lags the load |
 
 Search parameters are the same ones in the page URL, so a results link is a search you can re-run. `match` is `contains`, `starts`, `ends`, or `exact`. Sort is `date`, `price`, `domain`, or `length`.
 

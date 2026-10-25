@@ -72,7 +72,9 @@ export interface Sale {
 }
 
 export interface SearchResponse {
+  /** Exact total, or the cap when the match set is larger than the count probe. */
   total: number;
+  total_exact: boolean;
   page: number;
   page_size: number;
   pages: number;
@@ -119,4 +121,10 @@ export interface MetaResponse {
   date_max: string | null;
   extensions: { extension: string; count: number }[];
   venues: { venue: string; count: number }[];
+  /** When the summary tables were last rebuilt. Null before the first refresh. */
+  refreshed_at: string | null;
+  /** True when rows have changed since refreshed_at. Search still returns what is loaded. */
+  stale: boolean;
+  /** `rebuilt` after a stats write. `skipped` when a public refresh was inside the daily interval. */
+  refresh: "none" | "rebuilt" | "skipped";
 }

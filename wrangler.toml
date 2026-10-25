@@ -2,6 +2,11 @@ name = "namesales"
 main = "src/worker/index.ts"
 compatibility_date = "2026-10-25"
 
+# Nightly catalog counts, after the sales load. Cron triggers are free.
+# `wrangler dev` does not fire this unless you pass --test-scheduled.
+[triggers]
+crons = ["30 1 * * *"]
+
 # Replace database_id after `npx wrangler d1 create namesales`.
 # The placeholder is enough for `wrangler dev` and a local D1 database.
 [[d1_databases]]

@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CompsResponse, DomainResponse, SearchResponse } from "../src/shared/types";
+import type { CompsResponse, DomainResponse, MetaResponse, SearchResponse } from "../src/shared/types";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const port = 8791;
@@ -78,22 +78,49 @@ async function main() {
   }
 
   console.log("Starting wrangler dev…");
-  const child = spawn(join(root, "node_modules", ".bin", "wrangler"), ["dev", "--port", String(port), "--ip", "127.0.0.1"], {
+  const child = spawn(join(root, "node_modules", ".bin", "wrangler"), ["dev", "--port", String(port), "--ip", "127.0.0.1", "--var", "ADMIN_KEY:smoke"], {
     cwd: root,
     env: { ...process.env, CI: "true", BROWSER: "none" },
   });
   try {
     await waitForServer(child);
     const sampleLines = readFileSync(join(root, "fixtures", "sample-sales.csv"), "utf8").trim().split("\n").length - 1;
-    const health = await getJson<{ ok: boolean; sales: number }>("/api/health");
-    assert(health.ok && health.sales === sampleLines, `expected ${sampleLines} sales, got ${health.sales}`);
+    const health = await getJson<{ ok: boolean; sales: number | null }>("/api/health");
+    assert(health.ok, "health check failed");
+    const denied = await fetch(`${base}/api/meta?refresh=1&key=nope`);
+    assert(denied.status === 403, "a wrong refresh key should be rejected");
+    const meta = await getJson<MetaResponse>("/api/meta?refresh=1&key=smoke");
+    assert(meta.refresh === "rebuilt", "admin refresh should rebuild the summary");
+    assert(meta.total === sampleLines, `expected ${sampleLines} sales in the summary, got ${meta.total}`);
+    assert(meta.stale === false, "summary should match the rows just loaded");
+    const skipped = await getJson<MetaResponse>("/api/meta?refresh=1");
+    assert(skipped.refresh === "skipped", "a public refresh should not rebuild again the same day");
+    assert(skipped.total === sampleLines, "skipping refresh should keep the summary");
+    assert(meta.extensions.some((row) => row.extension === ".com" && row.count > 0), "extension summary was empty");
+    const catalogResponse = await fetch(`${base}/api/extensions`);
+    assert(catalogResponse.ok, "extension catalog request failed");
+    const cacheControl = catalogResponse.headers.get("cache-control") ?? "";
+    assert(cacheControl.includes("public") && cacheControl.includes("max-age=3600"), `extension catalog cache header was ${cacheControl}`);
+    const catalog = (await catalogResponse.json()) as { extensions: { extension: string; count: number }[] };
+    assert(catalog.extensions.some((row) => row.extension === ".com" && row.count > 0), "extension catalog was empty");
+    for (let index = 1; index < catalog.extensions.length; index += 1) {
+      const previous = catalog.extensions[index - 1];
+      const current = catalog.extensions[index];
+      assert(previous.count > current.count || (previous.count === current.count && previous.extension <= current.extension), "extension catalog is not ordered by count");
+    }
+    const healthAfter = await getJson<{ ok: boolean; sales: number | null; stale: boolean }>("/api/health");
+    assert(healthAfter.sales === sampleLines && healthAfter.stale === false, `health total was ${healthAfter.sales}`);
 
     const fts = await getJson<SearchResponse>("/api/search?q=lane&match=contains&page_size=100");
     assert(fts.match_applied === "fts", "3+ character search should use FTS");
     assert(fts.results.some((row) => row.sld === "harborlane"), "FTS should find harborlane for “lane”");
 
-    const prefix = await getJson<SearchResponse>("/api/search?q=ha&match=contains&page_size=100");
-    assert(prefix.match_applied === "prefix", "short search should fall back to a prefix");
+    const hinted = await getJson<SearchResponse>("/api/search?q=ai&match=contains&page_size=25");
+    assert(hinted.results.length === 0, "a two-character contains should not scan");
+    assert(hinted.notice?.includes("3"), "short contains should ask for 3 characters");
+    const prefix = await getJson<SearchResponse>("/api/search?q=ha&match=starts&page_size=100");
+    assert(prefix.match_applied === "prefix", "short starts-with should use a prefix");
+    assert(prefix.results.length > 0, "expected names starting with ha");
     assert(prefix.results.every((row) => row.sld.startsWith("ha")), "prefix results should start with ha");
 
     const exact = await getJson<SearchResponse>("/api/search?q=harborlane&match=exact&page_size=100");

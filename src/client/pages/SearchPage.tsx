@@ -67,7 +67,7 @@ export function SearchPage() {
         event.preventDefault();
         document.getElementById("q")?.focus();
       }
-      if (event.key === "Escape") setDrawer(false);
+      if (event.key === "Escape" && !document.querySelector(".ext-sheet, .ext-popover")) setDrawer(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -177,7 +177,7 @@ export function SearchPage() {
             state={state}
             meta={meta}
             open={drawer}
-            total={data?.total ?? null}
+            totalLabel={data ? `${formatResultCount(data.total, data.total_exact)} ${data.total === 1 && data.total_exact ? "sale" : "sales"}` : null}
             onClose={() => setDrawer(false)}
             onChange={commit}
           />
@@ -189,7 +189,7 @@ export function SearchPage() {
         <p>
           {data ? (
             <>
-              <strong>{data.total.toLocaleString("en-US")}</strong> {data.total === 1 ? "sale" : "sales"}
+              <strong>{formatResultCount(data.total, data.total_exact)}</strong> {data.total === 1 && data.total_exact ? "sale" : "sales"}
               <span className="elapsed">{data.elapsed_ms} ms</span>
             </>
           ) : (
@@ -233,6 +233,11 @@ export function SearchPage() {
         </div>
       </div>
 
+      {meta?.stale && (
+        <p className="notice">
+          Counts lag the sales loaded so far. They refresh nightly at 01:30 UTC.
+        </p>
+      )}
       {data?.notice && <p className="notice">{data.notice}</p>}
       {data?.window && (
         <p className="notice">
@@ -250,7 +255,7 @@ export function SearchPage() {
         {data && data.results.length === 0 && !error && (
           <div className="empty">
             <h2>No sales match</h2>
-            <p>Widen the price or date range, or include range estimates.</p>
+            <p>{data.notice ? "Use the note above, or add an extension to a one- or two-character keyword." : "Widen the price or date range, or include range estimates."}</p>
           </div>
         )}
         {!data && !error && <div className="skeleton" aria-hidden="true">{Array.from({ length: 8 }, (_, index) => <span key={index} />)}</div>}
@@ -261,6 +266,11 @@ export function SearchPage() {
       )}
     </main>
   );
+}
+
+function formatResultCount(total: number, exact: boolean): string {
+  const text = total.toLocaleString("en-US");
+  return exact ? text : `${text}+`;
 }
 
 function countFilters(state: PageState): number {
