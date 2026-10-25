@@ -97,6 +97,17 @@ async function main() {
     assert(skipped.refresh === "skipped", "a public refresh should not rebuild again the same day");
     assert(skipped.total === sampleLines, "skipping refresh should keep the summary");
     assert(meta.extensions.some((row) => row.extension === ".com" && row.count > 0), "extension summary was empty");
+    const catalogResponse = await fetch(`${base}/api/extensions`);
+    assert(catalogResponse.ok, "extension catalog request failed");
+    const cacheControl = catalogResponse.headers.get("cache-control") ?? "";
+    assert(cacheControl.includes("public") && cacheControl.includes("max-age=3600"), `extension catalog cache header was ${cacheControl}`);
+    const catalog = (await catalogResponse.json()) as { extensions: { extension: string; count: number }[] };
+    assert(catalog.extensions.some((row) => row.extension === ".com" && row.count > 0), "extension catalog was empty");
+    for (let index = 1; index < catalog.extensions.length; index += 1) {
+      const previous = catalog.extensions[index - 1];
+      const current = catalog.extensions[index];
+      assert(previous.count > current.count || (previous.count === current.count && previous.extension <= current.extension), "extension catalog is not ordered by count");
+    }
     const healthAfter = await getJson<{ ok: boolean; sales: number | null; stale: boolean }>("/api/health");
     assert(healthAfter.sales === sampleLines && healthAfter.stale === false, `health total was ${healthAfter.sales}`);
 

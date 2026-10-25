@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { MetaResponse } from "../../shared/types";
+import { ExtensionPicker } from "./ExtensionPicker";
 import type { PageState } from "../state";
 import { withFilter } from "../state";
 
@@ -21,8 +22,6 @@ export function Filters({
   onChange: (next: PageState) => void;
 }) {
   const filter = state.filter;
-  const extensions = meta?.extensions ?? [];
-  const chips = extensions.slice(0, 8);
   const venues = useMemo(() => {
     const list = [...(meta?.venues ?? [])];
     list.sort((a, b) => {
@@ -42,29 +41,11 @@ export function Filters({
         <button type="button" className="text-button" onClick={onClose}>Done</button>
       </div>
 
-      <div className="chips" role="group" aria-label="Extensions">
-        {chips.map((item) => {
-          const active = filter.extensions.includes(item.extension);
-          return (
-            <button
-              key={item.extension}
-              type="button"
-              className={active ? "chip is-on" : "chip"}
-              aria-pressed={active}
-              onClick={() => patch({ extensions: toggleValue(filter.extensions, item.extension) })}
-            >
-              {item.extension}
-            </button>
-          );
-        })}
-        {extensions.length > chips.length && (
-          <ExtensionMenu
-            extensions={extensions}
-            selected={filter.extensions}
-            onChange={(next) => patch({ extensions: next })}
-          />
-        )}
-      </div>
+      <ExtensionPicker
+        selected={filter.extensions}
+        seed={meta?.extensions}
+        onChange={(extensions) => patch({ extensions })}
+      />
 
       <div className="filter-grid">
         <NumberField label="Min price" value={filter.priceMin} onCommit={(priceMin) => patch({ priceMin })} prefix="$" />
@@ -208,40 +189,6 @@ function TriField({
         ))}
       </div>
     </fieldset>
-  );
-}
-
-function ExtensionMenu({
-  extensions,
-  selected,
-  onChange,
-}: {
-  extensions: { extension: string; count: number }[];
-  selected: string[];
-  onChange: (next: string[]) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const visible = extensions.filter((item) => item.extension.includes(query.toLowerCase()));
-  return (
-    <details className="menu">
-      <summary>All extensions</summary>
-      <div className="menu-panel">
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter extensions" aria-label="Filter extensions" />
-        <div className="menu-list">
-          {visible.map((item) => (
-            <label key={item.extension}>
-              <input
-                type="checkbox"
-                checked={selected.includes(item.extension)}
-                onChange={() => onChange(toggleValue(selected, item.extension))}
-              />
-              <span>{item.extension}</span>
-              <span className="count">{item.count.toLocaleString("en-US")}</span>
-            </label>
-          ))}
-        </div>
-      </div>
-    </details>
   );
 }
 

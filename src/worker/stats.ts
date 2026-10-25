@@ -8,6 +8,10 @@ export const INSERT_EXTENSION_STATS_SQL =
 export const INSERT_VENUE_STATS_SQL =
   "INSERT INTO sales_stats_venue (venue, n) SELECT venue, COUNT(*) FROM sales GROUP BY venue";
 
+/** Summary table only. Ordered for the extension picker; no scan of `sales`. */
+export const EXTENSION_CATALOG_SQL =
+  "SELECT extension, n FROM sales_stats_extension ORDER BY n DESC, extension ASC";
+
 /** The timestamp is the only bound parameter. */
 export const INSERT_SUMMARY_STATS_SQL = `INSERT INTO sales_stats
   (id, total, estimates, unknown_venues, date_min, date_max, max_id, refreshed_at)
@@ -73,6 +77,12 @@ export async function metaStats(db: D1Database, mode: RebuildMode, now = Date.no
 /** Nightly cron entry. Ignores the public interval. */
 export function rebuildCatalog(db: D1Database): Promise<void> {
   return refreshStats(db);
+}
+
+export async function extensionCatalog(db: D1Database): Promise<{ extension: string; count: number }[]> {
+  await ensureStatsTables(db);
+  const result = await db.prepare(EXTENSION_CATALOG_SQL).all<{ extension: string; n: number }>();
+  return result.results.map((row) => ({ extension: row.extension, count: asNumber(row.n) }));
 }
 
 /** Exact catalog total when the summary matches the rows currently loaded. */

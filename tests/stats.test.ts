@@ -3,7 +3,7 @@ import { prefixBounds, sldDomainBounds } from "../src/shared/domain";
 import { readFileSync } from "node:fs";
 import { foldStats, interpretCount, shouldRebuild, statsAreStale } from "../src/shared/stats";
 import { resultPages } from "../src/shared/search";
-import { INSERT_EXTENSION_STATS_SQL, INSERT_SUMMARY_STATS_SQL, INSERT_VENUE_STATS_SQL } from "../src/worker/stats";
+import { EXTENSION_CATALOG_SQL, INSERT_EXTENSION_STATS_SQL, INSERT_SUMMARY_STATS_SQL, INSERT_VENUE_STATS_SQL } from "../src/worker/stats";
 
 describe("catalog stats", () => {
   it("folds one grouped scan into extension and venue totals", () => {
@@ -44,6 +44,10 @@ describe("stats rebuild", () => {
     expect(INSERT_VENUE_STATS_SQL).toContain("GROUP BY venue");
     expect(INSERT_VENUE_STATS_SQL).not.toContain("?");
     expect(INSERT_SUMMARY_STATS_SQL.match(/\?/g)).toHaveLength(1);
+    expect(EXTENSION_CATALOG_SQL).toContain("FROM sales_stats_extension");
+    expect(EXTENSION_CATALOG_SQL).toContain("ORDER BY n DESC");
+    expect(EXTENSION_CATALOG_SQL).not.toMatch(/FROM sales\b/);
+    expect(EXTENSION_CATALOG_SQL).not.toContain("?");
   });
 
   it("rebuilds from a public request at most once a day, and always for cron or the admin key", () => {

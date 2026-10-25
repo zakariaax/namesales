@@ -119,6 +119,7 @@ Both counts should match the rows loaded so far (225,029 once the full set is in
 | GET | `/api/domains/:domain` | Every recorded sale of that domain |
 | GET | `/api/domains/:domain/comps` | Other extensions, similar names, similar length, nearby exact prices |
 | GET | `/api/meta` | Cached extension and venue facets. `?refresh=1&key=` rebuilds them when the key matches `ADMIN_KEY`. Without the key, at most once per day |
+| GET | `/api/extensions` | Extension names and sale counts from `sales_stats_extension` only. `Cache-Control: public, max-age=3600` |
 | GET | `/api/health` | Liveness. `sales` is the cached total, or null when that cache lags the load |
 
 Search parameters are the same ones in the page URL, so a results link is a search you can re-run. `match` is `contains`, `starts`, `ends`, or `exact`. Sort is `date`, `price`, `domain`, or `length`.

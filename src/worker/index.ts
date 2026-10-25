@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { domainComps, domainSales, filterFromUrl, healthStatus, meta, searchSales } from "./db";
 import type { Env } from "./env";
-import { rebuildCatalog } from "./stats";
+import { extensionCatalog, rebuildCatalog } from "./stats";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -18,6 +18,14 @@ app.get("/api/meta", async (c) => {
     return json(await meta(c.env.DB, "forced"));
   }
   return json(await meta(c.env.DB, wantsRefresh ? "public" : "auto"));
+});
+
+app.get("/api/extensions", async (c) => {
+  const extensions = await extensionCatalog(c.env.DB);
+  return Response.json(
+    { extensions },
+    { headers: { "cache-control": "public, max-age=3600" } },
+  );
 });
 
 app.get("/api/search", async (c) => {

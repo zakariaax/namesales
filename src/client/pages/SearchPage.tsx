@@ -67,7 +67,7 @@ export function SearchPage() {
         event.preventDefault();
         document.getElementById("q")?.focus();
       }
-      if (event.key === "Escape") setDrawer(false);
+      if (event.key === "Escape" && !document.querySelector(".ext-sheet, .ext-popover")) setDrawer(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
